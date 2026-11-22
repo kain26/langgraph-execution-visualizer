@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="用 Three.js 逐步理解 LangGraph Python 1.2.15 的源码执行路径，包括 Pregel、状态合并和审批恢复。">
+  <title>LangGraph 源码执行路径</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --font-size-base: 16px;
+      --background: #fafafa;
+      --foreground: #172033;
+      --muted-foreground: #515c6c;
+      --border: #d6dbe2;
+      --accent: #eaf0fd;
+      --viz-series-1: #1b55c3;
+      --ring: #1b55c3;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #17191d;
+        --foreground: #edf1fa;
+        --muted-foreground: #adb6c5;
+        --border: #414752;
+        --accent: #293447;
+        --viz-series-1: #82b1ff;
+        --ring: #82b1ff;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--foreground);
+      font: 400 var(--font-size-base)/1.55 system-ui, sans-serif;
+    }
+    main { width: min(100%, 52rem); margin: 0 auto; padding: clamp(1rem, 4vw, 2.5rem); }
+    h2, h3 { font-weight: 600; line-height: 1.35; }
+    h2 { font-size: clamp(1.25rem, 4vw, 1.65rem); }
+    h3 { font-size: 1.075rem; }
+    .viz-row { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; }
+    .btn {
+      appearance: none;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--background);
+      color: var(--foreground);
+      min-height: 2.5rem;
+      padding: .35rem .85rem;
+      font: inherit;
+      cursor: pointer;
+    }
+    .btn-primary { background: var(--foreground); color: var(--background); border-color: var(--foreground); }
+    .btn:disabled { opacity: .5; cursor: default; }
+    :focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+    .cursor-interaction { cursor: grab; }
+    .cursor-interaction:active { cursor: grabbing; }
+    .text-muted { color: var(--muted-foreground); }
+    .text-small { font-size: .875rem; }
+    .tabular-nums { font-variant-numeric: tabular-nums; }
+    @media (pointer: coarse) { .btn { min-height: 44px; } }
+  </style>
+</head>
+<body>
+<main aria-label="LangGraph 三维执行路径">
+<div id="langgraph-execution">
+  <h2>LangGraph 源码执行路径</h2>
+  <div class="viz-row lg-controls" aria-label="执行步骤">
+    <button class="btn" type="button" data-prev>上一步</button>
+    <button class="btn btn-primary" type="button" data-next>下一步</button>
+    <span class="text-muted tabular-nums" data-count></span>
+  </div>
+  <div class="lg-stage" data-stage aria-label="三维架构图。拖动旋转，使用上一步或下一步查看执行状态。">
+    <div class="lg-world cursor-interaction" data-world hidden aria-hidden="true"></div>
+    <div class="lg-labels" data-labels hidden aria-hidden="true"></div>
+    <div class="lg-flat" data-flat aria-label="执行路径"></div>
+  </div>
+  <div class="lg-status" aria-live="polite">
+    <h3 data-heading></h3>
+    <div data-detail></div>
+    <div class="text-small text-muted lg-source"><a data-source target="_blank" rel="noopener noreferrer"></a></div>
+  </div>
+</div>
+<style>
+  #langgraph-execution .lg-controls { margin-block: calc(var(--font-size-base, 14px) * .6); }
+  #langgraph-execution .lg-stage { position: relative; }
+  #langgraph-execution .lg-stage[data-renderer="three"] { height: clamp(290px, 57vw, 405px); }
+  #langgraph-execution .lg-world, #langgraph-execution .lg-labels { position: absolute; inset: 0; }
+  #langgraph-execution .lg-world { touch-action: pan-y; }
+  #langgraph-execution canvas { display: block; }
+  #langgraph-execution .lg-labels { pointer-events: none; }
+  #langgraph-execution .lg-label { position: absolute; transform: translate(-50%, -50%); white-space: nowrap; color: var(--foreground, CanvasText); font-weight: 500; }
+  #langgraph-execution .lg-label[data-active] { color: var(--foreground, CanvasText); text-decoration: underline; text-underline-offset: .23em; text-decoration-color: var(--viz-series-1, currentColor); }
+  #langgraph-execution .lg-flat { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .45em 1em; margin-block: 1em; }
+  #langgraph-execution .lg-flat[hidden] { display: none; }
+  #langgraph-execution .lg-flat span { padding-block: .35em; border-block-end: 1px solid var(--border); }
+  #langgraph-execution .lg-flat span[data-active] { font-weight: 500; text-decoration: underline; text-underline-offset: .23em; }
+  #langgraph-execution .lg-status { padding-block-start: .7em; border-block-start: 1px solid var(--border); }
+  #langgraph-execution .lg-status > div { margin-block-start: .35em; }
+  #langgraph-execution .lg-source a { color: inherit; }
+</style>
+<script>
+(() => {
+  const root = document.getElementById('langgraph-execution');
+  const get = name => root.querySelector('[data-' + name + ']');
+  const stage = get('stage');
+  const world = get('world');
+  const labels = get('labels');
+  const flat = get('flat');
+  const previous = get('prev');
+  const next = get('next');
+  const sourceRoot = 'https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/';
+  const nodes = {
+    graph: {label: 'StateGraph', x: -3.1, z: -3.0, shape: 'graph'},
+    plan: {label: 'Plan', x: 0, z: -3.0, shape: 'plan'},
+    a: {label: 'Worker A · 5m', x: -2.25, z: -.85, shape: 'worker'},
+    b: {label: 'Worker B · 15m', x: 2.25, z: -.85, shape: 'worker'},
+    update: {label: 'Update', x: 0, z: 1.2, shape: 'update'},
+    checkpoint: {label: 'Checkpoint', x: -3.1, z: 3.0, shape: 'checkpoint'},
+    approval: {label: 'Interrupt', x: 3.1, z: 3.0, shape: 'approval'}
+  };
+  const edges = [
+    ['graph','plan'], ['plan','a'], ['plan','b'], ['a','update'], ['b','update'],
+    ['update','checkpoint'], ['update','approval'], ['checkpoint','approval']
+  ];
+  const steps = [
+    {title:'编译图', detail:'StateGraph.compile() 把节点、边和 State Schema 装配成由 Pregel 执行的 CompiledStateGraph。', active:['graph'], routes:[0], file:'graph/state.py', symbol:'StateGraph.compile'},
+    {title:'Plan · 决定这一轮跑谁', detail:'invoke() 写入输入后，prepare_next_tasks() 根据 Channel 的版本和已读进度选中两个取数节点。', active:['plan','a','b'], routes:[1,2], file:'pregel/_algo.py', symbol:'prepare_next_tasks'},
+    {title:'Execution · 并行读旧状态', detail:'A、B 都读到 facts=[]。本轮分别产出 [5m] 和 [15m] 两份写入，暂存在各自的任务里。', active:['a','b'], routes:[3,4], file:'pregel/_runner.py', symbol:'PregelRunner'},
+    {title:'Update · 一轮跑完才合并', detail:'apply_writes() 将更新交给 Channel。facts 的 operator.add reducer 合并为 [5m, 15m]，下一轮才能读取。', active:['update'], routes:[3,4], file:'pregel/_algo.py', symbol:'apply_writes'},
+    {title:'Checkpoint · 保存可恢复的进度', detail:'配置 checkpointer 后，可按 thread_id 找回状态、Channel 版本和待处理任务信息。', active:['checkpoint'], routes:[5], file:'pregel/_loop.py', symbol:'PregelLoop'},
+    {title:'Interrupt · 等待外部审批', detail:'审批节点调用 interrupt() 暂停。调用方收到中断信息，任务可在同一 thread_id 上继续。', active:['approval','checkpoint'], routes:[6], file:'types.py', symbol:'interrupt'},
+    {title:'Resume · 审批节点从头再执行', detail:'用同一 thread_id 提交 Command(resume="approve")。审批节点从头重进，interrupt() 这次返回 approve。', active:['checkpoint','approval'], routes:[7], file:'types.py', symbol:'interrupt / Command'}
+  ];
+
+  let index = 0;
+  let onSceneStep = () => {};
+  function produceLabels(container, className) {
+    return Object.fromEntries(Object.entries(nodes).map(([id, entry]) => {
+      const label = document.createElement('span');
+      label.className = className;
+      label.textContent = entry.label;
+      container.append(label);
+      return [id, label];
+    }));
+  }
+  const flatLabels = produceLabels(flat, '');
+  const projectedLabels = produceLabels(labels, 'lg-label');
+
+  function show(direction = 0) {
+    const step = steps[index];
+    get('count').textContent = (index + 1) + ' / ' + steps.length;
+    get('heading').textContent = step.title;
+    get('detail').textContent = step.detail;
+    const source = get('source');
+    source.href = sourceRoot + step.file;
+    source.textContent = step.file + ' · ' + step.symbol;
+    previous.disabled = index === 0;
+    next.disabled = index === steps.length - 1;
+    next.textContent = index === 5 ? '恢复审批' : '下一步';
+    for (const id of Object.keys(nodes)) {
+      flatLabels[id].toggleAttribute('data-active', step.active.includes(id));
+      projectedLabels[id].toggleAttribute('data-active', step.active.includes(id));
+    }
+    onSceneStep(step, direction);
+  }
+  previous.addEventListener('click', () => { if (index > 0) { index -= 1; show(-1); } });
+  next.addEventListener('click', () => { if (index < steps.length - 1) { index += 1; show(1); } });
+  show();
+
+  async function mountScene() {
+    const THREE = await import('https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js');
+    const renderer = new THREE.WebGLRenderer({alpha: true, antialias: true, powerPreference: 'low-power'});
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(0, 0);
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-6, 6, 4, -4, .1, 70);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0xb6bfd4, 2.05));
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.2);
+    keyLight.position.set(-3, 8, 4);
+    scene.add(keyLight);
+    const sample = document.createElement('canvas');
+    sample.width = sample.height = 1;
+    const context = sample.getContext('2d', {willReadFrequently:true});
+    function themeColor(name, fallback) {
+      const value = getComputedStyle(root).getPropertyValue(name).trim();
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = fallback;
+      if (value) context.fillStyle = value;
+      context.fillRect(0, 0, 1, 1);
+      const [r,g,b] = context.getImageData(0, 0, 1, 1).data;
+      return new THREE.Color().setRGB(r/255, g/255, b/255, THREE.SRGBColorSpace);
+    }
+    const surfaces = new Map();
+    const decorations = [];
+    function mesh(geometry, material, x, y, z, parent) {
+      const object = new THREE.Mesh(geometry, material);
+      object.position.set(x,y,z);
+      parent.add(object);
+      return object;
+    }
+    function material() {
+      return new THREE.MeshStandardMaterial({roughness:.72, metalness:.06});
+    }
+    const accentDetail = id => {
+      const detail = material();
+      decorations.push([id,detail]);
+      return detail;
+    };
+
+    for (const [id, n] of Object.entries(nodes)) {
+      const group = new THREE.Group();
+      group.position.set(n.x, 0, n.z);
+      scene.add(group);
+      const body = material();
+      const detail = accentDetail(id);
+      surfaces.set(id, body);
+      if (n.shape === 'checkpoint') {
+        for (let i = 0; i < 3; i++) mesh(new THREE.CylinderGeometry(.61,.61,.16,32), body,0,.10+i*.20,0,group);
+        mesh(new THREE.CylinderGeometry(.42,.42,.035,28), detail,0,.605,0,group);
+      } else if (n.shape === 'plan') {
+        mesh(new THREE.CylinderGeometry(.68,.68,.28,6), body,0,.16,0,group);
+        for (let i = 0; i < 3; i++) {
+          const a = i * 2 * Math.PI / 3 - Math.PI/2;
+          mesh(new THREE.SphereGeometry(.105,14,10), detail,.34*Math.cos(a),.32,.34*Math.sin(a),group);
+        }
+      } else if (n.shape === 'approval') {
+        mesh(new THREE.BoxGeometry(1.22,.22,.95),body,0,.13,0,group);
+        for (const x of [-.39,.39]) mesh(new THREE.BoxGeometry(.15,.61,.20),body,x,.41,0,group);
+        mesh(new THREE.BoxGeometry(.83,.095,.16),detail,0,.57,0,group);
+      } else {
+        for (let layer = 0; layer < (n.shape === 'worker' ? 1 : 2); layer++) {
+          mesh(new THREE.BoxGeometry(1.46,.16,.90),body,0,.12+layer*.19,0,group);
+        }
+        if (n.shape === 'worker') {
+          for (const x of [-.37,0,.37]) mesh(new THREE.BoxGeometry(.20,.42,.59),detail,x,.39,0,group);
+        } else if (n.shape === 'update') {
+          mesh(new THREE.BoxGeometry(.87,.08,.15),detail,0,.46,0,group);
+          for (const x of [-.32,.32]) mesh(new THREE.BoxGeometry(.13,.08,.47),detail,x,.46,0,group);
+        } else {
+          for (const [x,z] of [[-.40,-.18],[.40,-.18],[0,.19]]) {
+            mesh(new THREE.BoxGeometry(.23,.11,.22),detail,x,.45,z,group);
+          }
+        }
+      }
+    }
+
+    const arrowPaths = edges.map(([from,to]) => {
+      const start = new THREE.Vector3(nodes[from].x,.15,nodes[from].z);
+      const end = new THREE.Vector3(nodes[to].x,.15,nodes[to].z);
+      const direction = end.clone().sub(start).normalize();
+      start.addScaledVector(direction,.77);
+      end.addScaledVector(direction,-.77);
+      const arrow = new THREE.ArrowHelper(direction,start,start.distanceTo(end),0x000000,.16,.11);
+      scene.add(arrow);
+      return {start,end,arrow};
+    });
+    const pulses = arrowPaths.map(() =>
+      mesh(new THREE.SphereGeometry(.085,16,12),new THREE.MeshBasicMaterial(),0,0,0,scene)
+    );
+    const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let width = 0;
+    let height = 0;
+    let angle = .22;
+    let drag;
+    let frame = 0;
+    let selected = steps[index];
+
+    function render() {
+      camera.position.set(11*Math.sin(angle),18,11*Math.cos(angle));
+      camera.lookAt(0,0,0);
+      camera.updateMatrixWorld();
+      for (const [id, n] of Object.entries(nodes)) {
+        const projected = new THREE.Vector3(n.x,0,n.z + .86).project(camera);
+        const label = projectedLabels[id];
+        const halfLabel = label.offsetWidth / 2 + 2;
+        const x = Math.max(halfLabel,Math.min(width-halfLabel,(projected.x+1)*width/2));
+        label.style.left = x + 'px';
+        label.style.top = ((1 - projected.y) * height / 2) + 'px';
+      }
+      renderer.render(scene,camera);
+    }
+    function resize() {
+      width = stage.clientWidth;
+      height = stage.clientHeight;
+      if (!width || !height) return;
+      renderer.setSize(width,height);
+      const aspect = width/height;
+      const halfWidth = Math.max(5.2,4.55*aspect);
+      const halfHeight = halfWidth/aspect;
+      camera.left = -halfWidth;
+      camera.right = halfWidth;
+      camera.top = halfHeight;
+      camera.bottom = -halfHeight;
+      camera.updateProjectionMatrix();
+      render();
+    }
+    function paint(step, animate) {
+      selected = step;
+      const foreground = themeColor('--foreground','#172033');
+      const background = themeColor('--background','#f8fafc');
+      const active = themeColor('--viz-series-1','#2871d8');
+      surfaces.forEach((surface,id) => surface.color.copy(background).lerp(step.active.includes(id) ? active : foreground,step.active.includes(id) ? .68 : .22));
+      for (const [id, detail] of decorations) {
+        detail.color.copy(step.active.includes(id) ? active : foreground);
+      }
+      arrowPaths.forEach(({arrow},i) => arrow.setColor(step.routes.includes(i) ? active : background.clone().lerp(foreground,.48)));
+      cancelAnimationFrame(frame);
+      pulses.forEach(pulse => { pulse.visible = false; pulse.material.color.copy(active); });
+      render();
+      if (!animate || motion.matches) return;
+      const begin = performance.now();
+      function move(now) {
+        const progress = Math.min(1,(now-begin)/680);
+        for (const i of step.routes) {
+          const {start,end} = arrowPaths[i];
+          const pulse = pulses[i];
+          pulse.visible = progress < 1;
+          pulse.position.lerpVectors(start,end,progress);
+          pulse.position.y += .11;
+        }
+        render();
+        if (progress < 1) frame = requestAnimationFrame(move);
+      }
+      frame = requestAnimationFrame(move);
+    }
+    world.addEventListener('pointerdown', event => {
+      drag = {id:event.pointerId,x:event.clientX,angle};
+      world.setPointerCapture(event.pointerId);
+    });
+    world.addEventListener('pointermove', event => {
+      if (!drag || drag.id !== event.pointerId) return;
+      angle = Math.max(-.55,Math.min(.55,drag.angle + (event.clientX-drag.x)*.006));
+      render();
+    });
+    for (const type of ['pointerup','pointercancel','lostpointercapture']) {
+      world.addEventListener(type, () => { drag = undefined; });
+    }
+    world.append(renderer.domElement);
+    world.hidden = false;
+    labels.hidden = false;
+    flat.hidden = true;
+    stage.dataset.renderer = 'three';
+    const observer = new ResizeObserver(resize);
+    observer.observe(stage);
+    onSceneStep = (step, direction) => paint(step, direction > 0);
+    const recolor = () => paint(selected,false);
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', recolor);
+    resize();
+    paint(steps[index],false);
+  }
+  mountScene().catch(() => {
+    world.hidden = true;
+    labels.hidden = true;
+    flat.hidden = false;
+    delete stage.dataset.renderer;
+    onSceneStep = () => {};
+  });
+})();
+</script>
+</main>
+</body>
+</html>
