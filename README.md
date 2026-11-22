@@ -2,9 +2,9 @@
 
 **[打开在线演示](https://langgraph-execution-visualizer.pages.dev/)**
 
-从一次并行取数出发，逐步看懂 LangGraph Python `1.2.15` 如何选任务、执行节点、合并状态，再通过 checkpoint 保存和恢复进度。
+首页用 Three.js 动画演示 LangGraph Python `1.2.15` 的执行过程。拖动可转动视角，点「下一步」逐段查看。
 
-页面默认打开 Plan。点击流程中的任一步可查看具体输入、结果和源码定位。下面有 Channel 双写、checkpoint 查找和面试自测。
+[深入源码与实验](https://langgraph-execution-visualizer.pages.dev/guide) 讲解 Pregel、superstep、Channel、checkpoint 和审批恢复，包含源码行号、两个小实验和面试自测。
 
 ## 本地预览
 

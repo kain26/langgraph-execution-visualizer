@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="通过一次并行取数读懂 LangGraph 1.2.15 的执行、状态合并和断点恢复。">
+  <title>LangGraph 源码解读</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./flow.js"></script>
+</head>
+<body>
+<main>
+  <header class="page-head">
+    <h1>LangGraph 执行原理</h1>
+    <p>一轮 superstep，先选任务，再并行执行，最后合并状态。</p>
+    <nav class="chapter-nav" aria-label="目录">
+      <a href="./">返回动画</a>
+      <a href="#superstep">执行循环</a>
+      <a href="#channels">Channel</a>
+      <a href="#checkpoints">Checkpoint</a>
+      <a href="#interview">面试自测</a>
+    </nav>
+  </header>
+
+  <section id="factory" aria-label="可交互执行流程">
+    <nav class="flow" aria-label="选择执行步骤">
+      <button type="button" data-step="0" class="substep">编译图</button>
+      <div class="round" role="group" aria-label="一轮 Superstep">
+        <button type="button" data-step="1" aria-current="step"><span>Plan</span>选任务</button>
+        <span aria-hidden="true" class="arrow">→</span>
+        <button type="button" data-step="2"><span>Execution</span>并行执行</button>
+        <span aria-hidden="true" class="arrow">→</span>
+        <button type="button" data-step="3"><span>Update</span>合并状态</button>
+      </div>
+      <div class="after-round" role="group" aria-label="持久化与人工审批">
+        <button type="button" data-step="4" class="substep">保存快照</button>
+        <button type="button" data-step="5" class="substep">等待审批</button>
+        <button type="button" data-step="6" class="substep">恢复执行</button>
+      </div>
+    </nav>
+    <article class="step-detail" aria-labelledby="step-title">
+      <header aria-live="polite">
+        <h2 id="step-title" data-heading>Plan · tick() 选出本轮要跑的节点</h2>
+        <p data-detail></p>
+      </header>
+      <div class="example" aria-label="这一步发生了什么">
+        <span data-example-label></span><code data-example></code>
+      </div>
+      <a class="source-link" data-source target="_blank" rel="noopener noreferrer"></a>
+      <details class="step-source">
+        <summary>展开本步读写和源码逻辑</summary>
+        <dl class="source-trace">
+          <dt>读什么</dt><dd data-read></dd>
+          <dt>写什么</dt><dd data-write></dd>
+          <dt>为什么</dt><dd data-why></dd>
+        </dl>
+        <pre class="source-code" aria-label="源码逻辑简化示意"><code data-code></code></pre>
+      </details>
+      <div class="controls" aria-label="逐步浏览">
+        <button type="button" data-prev>上一步</button>
+        <button type="button" class="primary" data-next>下一步</button>
+        <span class="progress" data-count></span>
+      </div>
+    </article>
+  </section>
+<section class="lesson" id="superstep" aria-labelledby="superstep-title">
+  <h2 id="superstep-title">一轮 superstep 在源码里怎么跑？</h2>
+  <p>把一轮想成一次有统一结算时间的并行作业。所有节点先拿到这一轮的输入，做完交出各自的结果，最后统一更新状态。</p>
+  <pre class="source-code" aria-label="Pregel 主循环简化示意"><code># pregel/main.py · 简化后的同步执行骨架
+while loop.tick():            # Plan · 选出本轮任务
+    for _ in runner.tick(...): # Execution · 执行并收集写入
+        ...                   #   也会向调用方发送流式事件
+    loop.after_tick()          # Update · 合并 Channel，再安排保存 checkpoint</code></pre>
+  <ol>
+    <li><strong><code>_loop.py → tick()</code></strong> 调 <code>prepare_next_tasks()</code>。例如某节点订阅的触发 Channel 现在是版本 2，它上次处理到版本 1，且该触发 Channel 可用，就能安排它执行。<code>channel_versions</code> 记录每个 Channel 的进度，<code>versions_seen</code> 记录节点已经看到的版本。</li>
+    <li><strong><code>_runner.py → tick()</code></strong> 执行节点，完成后记录该任务的写入。图中的 A/B 本轮都读到 <code>facts=[]</code>，A 先完成也不会让 B 的本轮输入突然变化。</li>
+    <li><strong><code>_loop.py → after_tick()</code></strong> 调 <code>apply_writes()</code>，把各任务的写入按 Channel 分组，调用 <code>channel.update(values)</code>。已经更新的 Channel 可能触发下一轮节点。启用持久化时，这里也推进 checkpoint。</li>
+  </ol>
+  <p><a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/pregel/main.py#L3055">同步主循环</a> · <a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/pregel/main.py#L3526">异步主循环</a> · <a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/pregel/_loop.py#L720">轮末处理</a></p>
+</section>
+
+<section class="lesson" id="channels" aria-labelledby="channels-title">
+  <h2 id="channels-title">Channel 到底是什么？</h2>
+  <p>把 Channel 当作运行时管理的一个状态槽位。它有<strong>当前值、接收更新的规则</strong>，运行时还维护版本。<code>StateGraph</code> 把 <code>facts</code> 这类状态字段映射为 Channel，也会为节点间的控制流构建触发 Channel。所以要分清<strong>节点读哪些字段</strong>和<strong>哪些 Channel 更新会触发该节点</strong>。</p>
+  <fieldset class="experiment">
+    <legend>试一下同一轮的两次写入</legend>
+    <p>A 写入 <code>["5m"]</code>，B 写入 <code>["15m"]</code>。选择 <code>facts</code> 的更新规则看结果。</p>
+    <label><input type="radio" name="channel-reducer" value="aggregate" checked> 列表追加 reducer</label>
+    <label><input type="radio" name="channel-reducer" value="last"> 默认 LastValue</label>
+    <p class="answer" data-channel-result aria-live="polite">facts = ["5m", "15m"]。两份更新都进入下一轮的状态。</p>
+  </fieldset>
+  <p>工程上，把 <code>facts</code> 声明为 <code>Annotated[list[str], operator.add]</code>，并让节点返回各自产出的新条目。如果节点返回整份已有列表再追加，合并时可能重复累积。外部写库仍要单独设计幂等。</p>
+  <p><a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/pregel/_algo.py#L314">按 Channel 应用写入</a> · <a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/channels/last_value.py#L56">LastValue.update()</a> · <a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/channels/binop.py#L123">BinaryOperatorAggregate.update()</a></p>
+</section>
+
+<section class="lesson" id="checkpoints" aria-labelledby="checkpoints-title">
+  <h2 id="checkpoints-title">thread_id 和 checkpoint_id 怎么配合？</h2>
+  <p><strong><code>thread_id</code> 是哪一次持续的任务历史，<code>checkpoint_id</code> 是这段历史中的某份快照。</strong> 一个线程可以有多个 checkpoint。子图用 <code>checkpoint_ns</code> 区分命名空间，根图通常是空字符串。</p>
+  <fieldset class="experiment">
+    <legend>试一下 checkpointer 会选哪份进度</legend>
+    <p>教学示例 <code>review-42</code> 有 c1 和 c2。c1 时还没取数，c2 时两份行情已合并。</p>
+    <label><input type="radio" name="checkpoint-choice" value="latest" checked> 只传 thread_id = review-42</label>
+    <label><input type="radio" name="checkpoint-choice" value="specific"> 另传 checkpoint_id = c1</label>
+    <label><input type="radio" name="checkpoint-choice" value="other"> 换成新 thread_id = review-99</label>
+    <pre class="source-code" aria-label="configurable 配置示意"><code data-checkpoint-config>{"thread_id": "review-42"}</code></pre>
+    <p class="answer" data-checkpoint-result aria-live="polite">读取该线程最新的 c2。facts 已有 ["5m", "15m"]。</p>
+  </fieldset>
+  <p>Checkpoint 保存轮边界的图状态和版本信息。<code>put_writes()</code> 可为同一 checkpoint 单独记录已完成任务的写入。如果 A 完成并且它的写入已经持久化，B 随后失败，正常故障恢复可以复用 A 的结果，让未完成任务继续执行。显式从旧 checkpoint 回放时，后续节点可能重新执行。</p>
+  <p><a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/pregel/_loop.py#L1783">加载最新或指定 checkpoint</a> · <a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/pregel/_loop.py#L452">记录任务写入</a> · <a href="https://docs.langchain.com/oss/python/langgraph/persistence">持久化与故障恢复</a></p>
+</section>
+
+<section class="lesson" id="interview" aria-labelledby="interview-title">
+  <h2 id="interview-title">面试时用三个问题自测</h2>
+  <details><summary>Pregel 在 LangGraph 里负责什么？</summary><p>它是执行运行时。<code>StateGraph.compile()</code> 装配节点和 Channel，Pregel 每轮选择可运行节点、执行任务、批量更新 Channel，再根据新版本开始下一轮。</p></details>
+  <details><summary>A 先跑完，B 能读到 A 刚写的值吗？</summary><p>同一 superstep 内，B 读取这一轮的输入，A 的节点写入在轮末合并后才对下一轮可见。若 B 必须依赖 A 的结果，就用边让 B 在后续轮次执行。</p></details>
+  <details><summary>为什么恢复审批可能重复执行节点里的代码？</summary><p><code>Command(resume=...)</code> 让运行时用同一个 <code>thread_id</code> 找回进度。被中断的节点从函数开头执行，到 <code>interrupt()</code> 时取到审批值。把写库、付款或发通知放在审批之后，重试路径再用业务幂等键保护。</p></details>
+</section>
+</main>
+</body>
+</html>
