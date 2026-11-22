@@ -3,57 +3,63 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="沿一条可交互的工厂流水线读懂 LangGraph 1.2.15 源码。">
-  <title>LangGraph 执行工厂</title>
-  <link rel="stylesheet" href="./factory.css">
-  <script type="module" src="./factory.js"></script>
+  <meta name="description" content="通过一次并行取数读懂 LangGraph 1.2.15 的执行、状态合并和断点恢复。">
+  <title>LangGraph 执行原理</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./flow.js"></script>
 </head>
 <body>
 <main>
-  <h1 class="sr-only">LangGraph 执行工厂</h1>
-  <nav class="chapter-nav" aria-label="目录">
-    <a href="#factory">执行工厂</a>
-    <a href="#superstep">Superstep</a>
-    <a href="#channels">Channel</a>
-    <a href="#checkpoints">Checkpoint IDs</a>
-    <a href="#interview">面试自测</a>
-  </nav>
-  <section class="assembly" id="factory" aria-label="LangGraph 工厂演示">
-    <div class="cutaway">
-      <svg data-scene viewBox="0 0 1080 601" role="img" aria-labelledby="factory-name factory-description">
-        <title id="factory-name">LangGraph 执行工厂</title>
-        <desc id="factory-description">任务从左上方进厂，在右上方分为两个并行工位。待写入数据汇入下层的合并机，生成检查点后移到审批闸门。同一个闸门负责中断和恢复。</desc>
-      </svg>
-    </div>
-    <ul class="legend" aria-label="管道的颜色和含义">
-      <li><span class="chip state"></span>输入与状态</li>
-      <li><span class="chip writes"></span>本轮写入</li>
-      <li><span class="chip saved"></span>执行快照</li>
-      <li><span class="chip gate"></span>审批信号</li>
-    </ul>
-    <div class="controls" aria-label="播放控制">
-      <button type="button" data-prev>上一步</button>
-      <button type="button" class="primary" data-next>下一步</button>
-      <button type="button" data-play>播放</button>
-      <button type="button" data-camera aria-pressed="false">跟随货物</button>
-      <span class="progress" data-count></span>
-    </div>
-    <nav class="step-nav" data-step-nav aria-label="跳转到工位"></nav>
-    <article class="ticket" aria-labelledby="ticket-title">
-      <header class="ticket-head">
-        <span class="stamp" data-stamp aria-hidden="true">01</span>
-        <div aria-live="polite">
-          <h2 id="ticket-title" data-heading>编译图</h2>
-          <p data-detail></p>
-        </div>
+  <header class="page-head">
+    <h1>LangGraph 执行原理</h1>
+    <p>一轮 superstep，先选任务，再并行执行，最后合并状态。</p>
+    <nav class="chapter-nav" aria-label="目录">
+      <a href="#superstep">执行循环</a>
+      <a href="#channels">Channel</a>
+      <a href="#checkpoints">Checkpoint</a>
+      <a href="#interview">面试自测</a>
+    </nav>
+  </header>
+
+  <section id="factory" aria-label="可交互执行流程">
+    <nav class="flow" aria-label="选择执行步骤">
+      <button type="button" data-step="0" class="substep">编译图</button>
+      <div class="round" role="group" aria-label="一轮 Superstep">
+        <button type="button" data-step="1" aria-current="step"><span>Plan</span>选任务</button>
+        <span aria-hidden="true" class="arrow">→</span>
+        <button type="button" data-step="2"><span>Execution</span>并行执行</button>
+        <span aria-hidden="true" class="arrow">→</span>
+        <button type="button" data-step="3"><span>Update</span>合并状态</button>
+      </div>
+      <div class="after-round" role="group" aria-label="持久化与人工审批">
+        <button type="button" data-step="4" class="substep">保存快照</button>
+        <button type="button" data-step="5" class="substep">等待审批</button>
+        <button type="button" data-step="6" class="substep">恢复执行</button>
+      </div>
+    </nav>
+    <article class="step-detail" aria-labelledby="step-title">
+      <header aria-live="polite">
+        <h2 id="step-title" data-heading>Plan · tick() 选出本轮要跑的节点</h2>
+        <p data-detail></p>
       </header>
-      <dl class="source-trace">
-        <dt>本步读什么</dt><dd data-read></dd>
-        <dt>本步写什么</dt><dd data-write></dd>
-        <dt>为什么这样做</dt><dd data-why></dd>
-      </dl>
-      <pre class="source-code" aria-label="源码逻辑简化示意"><code data-code></code></pre>
+      <div class="example" aria-label="这一步发生了什么">
+        <span data-example-label></span><code data-example></code>
+      </div>
       <a class="source-link" data-source target="_blank" rel="noopener noreferrer"></a>
+      <details class="step-source">
+        <summary>展开本步读写和源码逻辑</summary>
+        <dl class="source-trace">
+          <dt>读什么</dt><dd data-read></dd>
+          <dt>写什么</dt><dd data-write></dd>
+          <dt>为什么</dt><dd data-why></dd>
+        </dl>
+        <pre class="source-code" aria-label="源码逻辑简化示意"><code data-code></code></pre>
+      </details>
+      <div class="controls" aria-label="逐步浏览">
+        <button type="button" data-prev>上一步</button>
+        <button type="button" class="primary" data-next>下一步</button>
+        <span class="progress" data-count></span>
+      </div>
     </article>
   </section>
 <section class="lesson" id="superstep" aria-labelledby="superstep-title">

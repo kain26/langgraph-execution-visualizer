@@ -2,9 +2,9 @@
 
 **[打开在线演示](https://langgraph-execution-visualizer.pages.dev/)**
 
-沿 SVG 工厂剖面流水线逐步理解 LangGraph Python `1.2.15` 的执行路径。点击「下一步」，或让镜头跟随货物经过各工位，查看 `compile()`、Pregel 调度、并行更新合并、Checkpoint 和人工审批恢复。每一步附有对应版本的源码入口。
+从一次并行取数出发，逐步看懂 LangGraph Python `1.2.15` 如何选任务、执行节点、合并状态，再通过 checkpoint 保存和恢复进度。
 
-每步提供源码行号、输入、写入和简化执行逻辑。下方有 superstep 主循环、Channel 合并试验、checkpoint 查找试验和面试自测。两个并行取数节点用于演示同一 superstep 的读写边界。恢复审批时，图会展示中断节点从头执行，以及 `Command(resume=...)` 如何成为 `interrupt()` 的返回值。
+页面默认打开 Plan。点击流程中的任一步可查看具体输入、结果和源码定位。下面有 Channel 双写、checkpoint 查找和面试自测。
 
 ## 本地预览
 
@@ -12,7 +12,7 @@
 python3 -m http.server 8080 --directory public
 ```
 
-打开 [localhost:8080](http://localhost:8080)。页面由静态 HTML、CSS、JavaScript 和代码绘制的 SVG 构成。选择「播放」可自动前进到审批闸门，再手动恢复执行。
+打开 [localhost:8080](http://localhost:8080)。页面由静态 HTML、CSS 和 JavaScript 构成。浏览到「等待审批」后，点击「恢复审批」查看同一节点重新执行。
 
 ## 更新部署
 
