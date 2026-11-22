@@ -3,362 +3,111 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="用 Three.js 逐步理解 LangGraph Python 1.2.15 的源码执行路径，包括 Pregel、状态合并和审批恢复。">
-  <title>LangGraph 源码执行路径</title>
-  <style>
-    :root {
-      color-scheme: light dark;
-      --font-size-base: 16px;
-      --background: #fafafa;
-      --foreground: #172033;
-      --muted-foreground: #515c6c;
-      --border: #d6dbe2;
-      --accent: #eaf0fd;
-      --viz-series-1: #1b55c3;
-      --ring: #1b55c3;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --background: #17191d;
-        --foreground: #edf1fa;
-        --muted-foreground: #adb6c5;
-        --border: #414752;
-        --accent: #293447;
-        --viz-series-1: #82b1ff;
-        --ring: #82b1ff;
-      }
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background: var(--background);
-      color: var(--foreground);
-      font: 400 var(--font-size-base)/1.55 system-ui, sans-serif;
-    }
-    main { width: min(100%, 52rem); margin: 0 auto; padding: clamp(1rem, 4vw, 2.5rem); }
-    h2, h3 { font-weight: 600; line-height: 1.35; }
-    h2 { font-size: clamp(1.25rem, 4vw, 1.65rem); }
-    h3 { font-size: 1.075rem; }
-    .viz-row { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; }
-    .btn {
-      appearance: none;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: var(--background);
-      color: var(--foreground);
-      min-height: 2.5rem;
-      padding: .35rem .85rem;
-      font: inherit;
-      cursor: pointer;
-    }
-    .btn-primary { background: var(--foreground); color: var(--background); border-color: var(--foreground); }
-    .btn:disabled { opacity: .5; cursor: default; }
-    :focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
-    .cursor-interaction { cursor: grab; }
-    .cursor-interaction:active { cursor: grabbing; }
-    .text-muted { color: var(--muted-foreground); }
-    .text-small { font-size: .875rem; }
-    .tabular-nums { font-variant-numeric: tabular-nums; }
-    @media (pointer: coarse) { .btn { min-height: 44px; } }
-  </style>
+  <meta name="description" content="沿一条可交互的工厂流水线读懂 LangGraph 1.2.15 源码。">
+  <title>LangGraph 执行工厂</title>
+  <link rel="stylesheet" href="./factory.css">
+  <script type="module" src="./factory.js"></script>
 </head>
 <body>
-<main aria-label="LangGraph 三维执行路径">
-<div id="langgraph-execution">
-  <h2>LangGraph 源码执行路径</h2>
-  <div class="viz-row lg-controls" aria-label="执行步骤">
-    <button class="btn" type="button" data-prev>上一步</button>
-    <button class="btn btn-primary" type="button" data-next>下一步</button>
-    <span class="text-muted tabular-nums" data-count></span>
-  </div>
-  <div class="lg-stage" data-stage aria-label="三维架构图。拖动旋转，使用上一步或下一步查看执行状态。">
-    <div class="lg-world cursor-interaction" data-world hidden aria-hidden="true"></div>
-    <div class="lg-labels" data-labels hidden aria-hidden="true"></div>
-    <div class="lg-flat" data-flat aria-label="执行路径"></div>
-  </div>
-  <div class="lg-status" aria-live="polite">
-    <h3 data-heading></h3>
-    <div data-detail></div>
-    <div class="text-small text-muted lg-source"><a data-source target="_blank" rel="noopener noreferrer"></a></div>
-  </div>
-</div>
-<style>
-  #langgraph-execution .lg-controls { margin-block: calc(var(--font-size-base, 14px) * .6); }
-  #langgraph-execution .lg-stage { position: relative; }
-  #langgraph-execution .lg-stage[data-renderer="three"] { height: clamp(290px, 57vw, 405px); }
-  #langgraph-execution .lg-world, #langgraph-execution .lg-labels { position: absolute; inset: 0; }
-  #langgraph-execution .lg-world { touch-action: pan-y; }
-  #langgraph-execution canvas { display: block; }
-  #langgraph-execution .lg-labels { pointer-events: none; }
-  #langgraph-execution .lg-label { position: absolute; transform: translate(-50%, -50%); white-space: nowrap; color: var(--foreground, CanvasText); font-weight: 500; }
-  #langgraph-execution .lg-label[data-active] { color: var(--foreground, CanvasText); text-decoration: underline; text-underline-offset: .23em; text-decoration-color: var(--viz-series-1, currentColor); }
-  #langgraph-execution .lg-flat { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .45em 1em; margin-block: 1em; }
-  #langgraph-execution .lg-flat[hidden] { display: none; }
-  #langgraph-execution .lg-flat span { padding-block: .35em; border-block-end: 1px solid var(--border); }
-  #langgraph-execution .lg-flat span[data-active] { font-weight: 500; text-decoration: underline; text-underline-offset: .23em; }
-  #langgraph-execution .lg-status { padding-block-start: .7em; border-block-start: 1px solid var(--border); }
-  #langgraph-execution .lg-status > div { margin-block-start: .35em; }
-  #langgraph-execution .lg-source a { color: inherit; }
-</style>
-<script>
-(() => {
-  const root = document.getElementById('langgraph-execution');
-  const get = name => root.querySelector('[data-' + name + ']');
-  const stage = get('stage');
-  const world = get('world');
-  const labels = get('labels');
-  const flat = get('flat');
-  const previous = get('prev');
-  const next = get('next');
-  const sourceRoot = 'https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/';
-  const nodes = {
-    graph: {label: 'StateGraph', x: -3.1, z: -3.0, shape: 'graph'},
-    plan: {label: 'Plan', x: 0, z: -3.0, shape: 'plan'},
-    a: {label: 'Worker A · 5m', x: -2.25, z: -.85, shape: 'worker'},
-    b: {label: 'Worker B · 15m', x: 2.25, z: -.85, shape: 'worker'},
-    update: {label: 'Update', x: 0, z: 1.2, shape: 'update'},
-    checkpoint: {label: 'Checkpoint', x: -3.1, z: 3.0, shape: 'checkpoint'},
-    approval: {label: 'Interrupt', x: 3.1, z: 3.0, shape: 'approval'}
-  };
-  const edges = [
-    ['graph','plan'], ['plan','a'], ['plan','b'], ['a','update'], ['b','update'],
-    ['update','checkpoint'], ['update','approval'], ['checkpoint','approval']
-  ];
-  const steps = [
-    {title:'编译图', detail:'StateGraph.compile() 把节点、边和 State Schema 装配成由 Pregel 执行的 CompiledStateGraph。', active:['graph'], routes:[0], file:'graph/state.py', symbol:'StateGraph.compile'},
-    {title:'Plan · 决定这一轮跑谁', detail:'invoke() 写入输入后，prepare_next_tasks() 根据 Channel 的版本和已读进度选中两个取数节点。', active:['plan','a','b'], routes:[1,2], file:'pregel/_algo.py', symbol:'prepare_next_tasks'},
-    {title:'Execution · 并行读旧状态', detail:'A、B 都读到 facts=[]。本轮分别产出 [5m] 和 [15m] 两份写入，暂存在各自的任务里。', active:['a','b'], routes:[3,4], file:'pregel/_runner.py', symbol:'PregelRunner'},
-    {title:'Update · 一轮跑完才合并', detail:'apply_writes() 将更新交给 Channel。facts 的 operator.add reducer 合并为 [5m, 15m]，下一轮才能读取。', active:['update'], routes:[3,4], file:'pregel/_algo.py', symbol:'apply_writes'},
-    {title:'Checkpoint · 保存可恢复的进度', detail:'配置 checkpointer 后，可按 thread_id 找回状态、Channel 版本和待处理任务信息。', active:['checkpoint'], routes:[5], file:'pregel/_loop.py', symbol:'PregelLoop'},
-    {title:'Interrupt · 等待外部审批', detail:'审批节点调用 interrupt() 暂停。调用方收到中断信息，任务可在同一 thread_id 上继续。', active:['approval','checkpoint'], routes:[6], file:'types.py', symbol:'interrupt'},
-    {title:'Resume · 审批节点从头再执行', detail:'用同一 thread_id 提交 Command(resume="approve")。审批节点从头重进，interrupt() 这次返回 approve。', active:['checkpoint','approval'], routes:[7], file:'types.py', symbol:'interrupt / Command'}
-  ];
+<main>
+  <h1 class="sr-only">LangGraph 执行工厂</h1>
+  <nav class="chapter-nav" aria-label="目录">
+    <a href="#factory">执行工厂</a>
+    <a href="#superstep">Superstep</a>
+    <a href="#channels">Channel</a>
+    <a href="#checkpoints">Checkpoint IDs</a>
+    <a href="#interview">面试自测</a>
+  </nav>
+  <section class="assembly" id="factory" aria-label="LangGraph 工厂演示">
+    <div class="cutaway">
+      <svg data-scene viewBox="0 0 1080 601" role="img" aria-labelledby="factory-name factory-description">
+        <title id="factory-name">LangGraph 执行工厂</title>
+        <desc id="factory-description">任务从左上方进厂，在右上方分为两个并行工位。待写入数据汇入下层的合并机，生成检查点后移到审批闸门。同一个闸门负责中断和恢复。</desc>
+      </svg>
+    </div>
+    <ul class="legend" aria-label="管道的颜色和含义">
+      <li><span class="chip state"></span>输入与状态</li>
+      <li><span class="chip writes"></span>本轮写入</li>
+      <li><span class="chip saved"></span>执行快照</li>
+      <li><span class="chip gate"></span>审批信号</li>
+    </ul>
+    <div class="controls" aria-label="播放控制">
+      <button type="button" data-prev>上一步</button>
+      <button type="button" class="primary" data-next>下一步</button>
+      <button type="button" data-play>播放</button>
+      <button type="button" data-camera aria-pressed="false">跟随货物</button>
+      <span class="progress" data-count></span>
+    </div>
+    <nav class="step-nav" data-step-nav aria-label="跳转到工位"></nav>
+    <article class="ticket" aria-labelledby="ticket-title">
+      <header class="ticket-head">
+        <span class="stamp" data-stamp aria-hidden="true">01</span>
+        <div aria-live="polite">
+          <h2 id="ticket-title" data-heading>编译图</h2>
+          <p data-detail></p>
+        </div>
+      </header>
+      <dl class="source-trace">
+        <dt>本步读什么</dt><dd data-read></dd>
+        <dt>本步写什么</dt><dd data-write></dd>
+        <dt>为什么这样做</dt><dd data-why></dd>
+      </dl>
+      <pre class="source-code" aria-label="源码逻辑简化示意"><code data-code></code></pre>
+      <a class="source-link" data-source target="_blank" rel="noopener noreferrer"></a>
+    </article>
+  </section>
+<section class="lesson" id="superstep" aria-labelledby="superstep-title">
+  <h2 id="superstep-title">一轮 superstep 在源码里怎么跑？</h2>
+  <p>把一轮想成一次有统一结算时间的并行作业。所有节点先拿到这一轮的输入，做完交出各自的结果，最后统一更新状态。</p>
+  <pre class="source-code" aria-label="Pregel 主循环简化示意"><code># pregel/main.py · 简化后的同步执行骨架
+while loop.tick():            # Plan · 选出本轮任务
+    for _ in runner.tick(...): # Execution · 执行并收集写入
+        ...                   #   也会向调用方发送流式事件
+    loop.after_tick()          # Update · 合并 Channel，再安排保存 checkpoint</code></pre>
+  <ol>
+    <li><strong><code>_loop.py → tick()</code></strong> 调 <code>prepare_next_tasks()</code>。例如某节点订阅的触发 Channel 现在是版本 2，它上次处理到版本 1，且该触发 Channel 可用，就能安排它执行。<code>channel_versions</code> 记录每个 Channel 的进度，<code>versions_seen</code> 记录节点已经看到的版本。</li>
+    <li><strong><code>_runner.py → tick()</code></strong> 执行节点，完成后记录该任务的写入。图中的 A/B 本轮都读到 <code>facts=[]</code>，A 先完成也不会让 B 的本轮输入突然变化。</li>
+    <li><strong><code>_loop.py → after_tick()</code></strong> 调 <code>apply_writes()</code>，把各任务的写入按 Channel 分组，调用 <code>channel.update(values)</code>。已经更新的 Channel 可能触发下一轮节点。启用持久化时，这里也推进 checkpoint。</li>
+  </ol>
+  <p><a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/pregel/main.py#L3055">同步主循环</a> · <a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/pregel/main.py#L3526">异步主循环</a> · <a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/pregel/_loop.py#L720">轮末处理</a></p>
+</section>
 
-  let index = 0;
-  let onSceneStep = () => {};
-  function produceLabels(container, className) {
-    return Object.fromEntries(Object.entries(nodes).map(([id, entry]) => {
-      const label = document.createElement('span');
-      label.className = className;
-      label.textContent = entry.label;
-      container.append(label);
-      return [id, label];
-    }));
-  }
-  const flatLabels = produceLabels(flat, '');
-  const projectedLabels = produceLabels(labels, 'lg-label');
+<section class="lesson" id="channels" aria-labelledby="channels-title">
+  <h2 id="channels-title">Channel 到底是什么？</h2>
+  <p>把 Channel 当作运行时管理的一个状态槽位。它有<strong>当前值、接收更新的规则</strong>，运行时还维护版本。<code>StateGraph</code> 把 <code>facts</code> 这类状态字段映射为 Channel，也会为节点间的控制流构建触发 Channel。所以要分清<strong>节点读哪些字段</strong>和<strong>哪些 Channel 更新会触发该节点</strong>。</p>
+  <fieldset class="experiment">
+    <legend>试一下同一轮的两次写入</legend>
+    <p>A 写入 <code>["5m"]</code>，B 写入 <code>["15m"]</code>。选择 <code>facts</code> 的更新规则看结果。</p>
+    <label><input type="radio" name="channel-reducer" value="aggregate" checked> 列表追加 reducer</label>
+    <label><input type="radio" name="channel-reducer" value="last"> 默认 LastValue</label>
+    <p class="answer" data-channel-result aria-live="polite">facts = ["5m", "15m"]。两份更新都进入下一轮的状态。</p>
+  </fieldset>
+  <p>工程上，把 <code>facts</code> 声明为 <code>Annotated[list[str], operator.add]</code>，并让节点返回各自产出的新条目。如果节点返回整份已有列表再追加，合并时可能重复累积。外部写库仍要单独设计幂等。</p>
+  <p><a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/pregel/_algo.py#L314">按 Channel 应用写入</a> · <a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/channels/last_value.py#L56">LastValue.update()</a> · <a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/channels/binop.py#L123">BinaryOperatorAggregate.update()</a></p>
+</section>
 
-  function show(direction = 0) {
-    const step = steps[index];
-    get('count').textContent = (index + 1) + ' / ' + steps.length;
-    get('heading').textContent = step.title;
-    get('detail').textContent = step.detail;
-    const source = get('source');
-    source.href = sourceRoot + step.file;
-    source.textContent = step.file + ' · ' + step.symbol;
-    previous.disabled = index === 0;
-    next.disabled = index === steps.length - 1;
-    next.textContent = index === 5 ? '恢复审批' : '下一步';
-    for (const id of Object.keys(nodes)) {
-      flatLabels[id].toggleAttribute('data-active', step.active.includes(id));
-      projectedLabels[id].toggleAttribute('data-active', step.active.includes(id));
-    }
-    onSceneStep(step, direction);
-  }
-  previous.addEventListener('click', () => { if (index > 0) { index -= 1; show(-1); } });
-  next.addEventListener('click', () => { if (index < steps.length - 1) { index += 1; show(1); } });
-  show();
+<section class="lesson" id="checkpoints" aria-labelledby="checkpoints-title">
+  <h2 id="checkpoints-title">thread_id 和 checkpoint_id 怎么配合？</h2>
+  <p><strong><code>thread_id</code> 是哪一次持续的任务历史，<code>checkpoint_id</code> 是这段历史中的某份快照。</strong> 一个线程可以有多个 checkpoint。子图用 <code>checkpoint_ns</code> 区分命名空间，根图通常是空字符串。</p>
+  <fieldset class="experiment">
+    <legend>试一下 checkpointer 会选哪份进度</legend>
+    <p>教学示例 <code>review-42</code> 有 c1 和 c2。c1 时还没取数，c2 时两份行情已合并。</p>
+    <label><input type="radio" name="checkpoint-choice" value="latest" checked> 只传 thread_id = review-42</label>
+    <label><input type="radio" name="checkpoint-choice" value="specific"> 另传 checkpoint_id = c1</label>
+    <label><input type="radio" name="checkpoint-choice" value="other"> 换成新 thread_id = review-99</label>
+    <pre class="source-code" aria-label="configurable 配置示意"><code data-checkpoint-config>{"thread_id": "review-42"}</code></pre>
+    <p class="answer" data-checkpoint-result aria-live="polite">读取该线程最新的 c2。facts 已有 ["5m", "15m"]。</p>
+  </fieldset>
+  <p>Checkpoint 保存轮边界的图状态和版本信息。<code>put_writes()</code> 可为同一 checkpoint 单独记录已完成任务的写入。如果 A 完成并且它的写入已经持久化，B 随后失败，正常故障恢复可以复用 A 的结果，让未完成任务继续执行。显式从旧 checkpoint 回放时，后续节点可能重新执行。</p>
+  <p><a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/pregel/_loop.py#L1783">加载最新或指定 checkpoint</a> · <a href="https://github.com/langchain-ai/langgraph/blob/1.2.15/libs/langgraph/langgraph/pregel/_loop.py#L452">记录任务写入</a> · <a href="https://docs.langchain.com/oss/python/langgraph/persistence">持久化与故障恢复</a></p>
+</section>
 
-  async function mountScene() {
-    const THREE = await import('https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js');
-    const renderer = new THREE.WebGLRenderer({alpha: true, antialias: true, powerPreference: 'low-power'});
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.setClearColor(0, 0);
-    const scene = new THREE.Scene();
-    const camera = new THREE.OrthographicCamera(-6, 6, 4, -4, .1, 70);
-    scene.add(new THREE.HemisphereLight(0xffffff, 0xb6bfd4, 2.05));
-    const keyLight = new THREE.DirectionalLight(0xffffff, 2.2);
-    keyLight.position.set(-3, 8, 4);
-    scene.add(keyLight);
-    const sample = document.createElement('canvas');
-    sample.width = sample.height = 1;
-    const context = sample.getContext('2d', {willReadFrequently:true});
-    function themeColor(name, fallback) {
-      const value = getComputedStyle(root).getPropertyValue(name).trim();
-      context.clearRect(0, 0, 1, 1);
-      context.fillStyle = fallback;
-      if (value) context.fillStyle = value;
-      context.fillRect(0, 0, 1, 1);
-      const [r,g,b] = context.getImageData(0, 0, 1, 1).data;
-      return new THREE.Color().setRGB(r/255, g/255, b/255, THREE.SRGBColorSpace);
-    }
-    const surfaces = new Map();
-    const decorations = [];
-    function mesh(geometry, material, x, y, z, parent) {
-      const object = new THREE.Mesh(geometry, material);
-      object.position.set(x,y,z);
-      parent.add(object);
-      return object;
-    }
-    function material() {
-      return new THREE.MeshStandardMaterial({roughness:.72, metalness:.06});
-    }
-    const accentDetail = id => {
-      const detail = material();
-      decorations.push([id,detail]);
-      return detail;
-    };
-
-    for (const [id, n] of Object.entries(nodes)) {
-      const group = new THREE.Group();
-      group.position.set(n.x, 0, n.z);
-      scene.add(group);
-      const body = material();
-      const detail = accentDetail(id);
-      surfaces.set(id, body);
-      if (n.shape === 'checkpoint') {
-        for (let i = 0; i < 3; i++) mesh(new THREE.CylinderGeometry(.61,.61,.16,32), body,0,.10+i*.20,0,group);
-        mesh(new THREE.CylinderGeometry(.42,.42,.035,28), detail,0,.605,0,group);
-      } else if (n.shape === 'plan') {
-        mesh(new THREE.CylinderGeometry(.68,.68,.28,6), body,0,.16,0,group);
-        for (let i = 0; i < 3; i++) {
-          const a = i * 2 * Math.PI / 3 - Math.PI/2;
-          mesh(new THREE.SphereGeometry(.105,14,10), detail,.34*Math.cos(a),.32,.34*Math.sin(a),group);
-        }
-      } else if (n.shape === 'approval') {
-        mesh(new THREE.BoxGeometry(1.22,.22,.95),body,0,.13,0,group);
-        for (const x of [-.39,.39]) mesh(new THREE.BoxGeometry(.15,.61,.20),body,x,.41,0,group);
-        mesh(new THREE.BoxGeometry(.83,.095,.16),detail,0,.57,0,group);
-      } else {
-        for (let layer = 0; layer < (n.shape === 'worker' ? 1 : 2); layer++) {
-          mesh(new THREE.BoxGeometry(1.46,.16,.90),body,0,.12+layer*.19,0,group);
-        }
-        if (n.shape === 'worker') {
-          for (const x of [-.37,0,.37]) mesh(new THREE.BoxGeometry(.20,.42,.59),detail,x,.39,0,group);
-        } else if (n.shape === 'update') {
-          mesh(new THREE.BoxGeometry(.87,.08,.15),detail,0,.46,0,group);
-          for (const x of [-.32,.32]) mesh(new THREE.BoxGeometry(.13,.08,.47),detail,x,.46,0,group);
-        } else {
-          for (const [x,z] of [[-.40,-.18],[.40,-.18],[0,.19]]) {
-            mesh(new THREE.BoxGeometry(.23,.11,.22),detail,x,.45,z,group);
-          }
-        }
-      }
-    }
-
-    const arrowPaths = edges.map(([from,to]) => {
-      const start = new THREE.Vector3(nodes[from].x,.15,nodes[from].z);
-      const end = new THREE.Vector3(nodes[to].x,.15,nodes[to].z);
-      const direction = end.clone().sub(start).normalize();
-      start.addScaledVector(direction,.77);
-      end.addScaledVector(direction,-.77);
-      const arrow = new THREE.ArrowHelper(direction,start,start.distanceTo(end),0x000000,.16,.11);
-      scene.add(arrow);
-      return {start,end,arrow};
-    });
-    const pulses = arrowPaths.map(() =>
-      mesh(new THREE.SphereGeometry(.085,16,12),new THREE.MeshBasicMaterial(),0,0,0,scene)
-    );
-    const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
-    let width = 0;
-    let height = 0;
-    let angle = .22;
-    let drag;
-    let frame = 0;
-    let selected = steps[index];
-
-    function render() {
-      camera.position.set(11*Math.sin(angle),18,11*Math.cos(angle));
-      camera.lookAt(0,0,0);
-      camera.updateMatrixWorld();
-      for (const [id, n] of Object.entries(nodes)) {
-        const projected = new THREE.Vector3(n.x,0,n.z + .86).project(camera);
-        const label = projectedLabels[id];
-        const halfLabel = label.offsetWidth / 2 + 2;
-        const x = Math.max(halfLabel,Math.min(width-halfLabel,(projected.x+1)*width/2));
-        label.style.left = x + 'px';
-        label.style.top = ((1 - projected.y) * height / 2) + 'px';
-      }
-      renderer.render(scene,camera);
-    }
-    function resize() {
-      width = stage.clientWidth;
-      height = stage.clientHeight;
-      if (!width || !height) return;
-      renderer.setSize(width,height);
-      const aspect = width/height;
-      const halfWidth = Math.max(5.2,4.55*aspect);
-      const halfHeight = halfWidth/aspect;
-      camera.left = -halfWidth;
-      camera.right = halfWidth;
-      camera.top = halfHeight;
-      camera.bottom = -halfHeight;
-      camera.updateProjectionMatrix();
-      render();
-    }
-    function paint(step, animate) {
-      selected = step;
-      const foreground = themeColor('--foreground','#172033');
-      const background = themeColor('--background','#f8fafc');
-      const active = themeColor('--viz-series-1','#2871d8');
-      surfaces.forEach((surface,id) => surface.color.copy(background).lerp(step.active.includes(id) ? active : foreground,step.active.includes(id) ? .68 : .22));
-      for (const [id, detail] of decorations) {
-        detail.color.copy(step.active.includes(id) ? active : foreground);
-      }
-      arrowPaths.forEach(({arrow},i) => arrow.setColor(step.routes.includes(i) ? active : background.clone().lerp(foreground,.48)));
-      cancelAnimationFrame(frame);
-      pulses.forEach(pulse => { pulse.visible = false; pulse.material.color.copy(active); });
-      render();
-      if (!animate || motion.matches) return;
-      const begin = performance.now();
-      function move(now) {
-        const progress = Math.min(1,(now-begin)/680);
-        for (const i of step.routes) {
-          const {start,end} = arrowPaths[i];
-          const pulse = pulses[i];
-          pulse.visible = progress < 1;
-          pulse.position.lerpVectors(start,end,progress);
-          pulse.position.y += .11;
-        }
-        render();
-        if (progress < 1) frame = requestAnimationFrame(move);
-      }
-      frame = requestAnimationFrame(move);
-    }
-    world.addEventListener('pointerdown', event => {
-      drag = {id:event.pointerId,x:event.clientX,angle};
-      world.setPointerCapture(event.pointerId);
-    });
-    world.addEventListener('pointermove', event => {
-      if (!drag || drag.id !== event.pointerId) return;
-      angle = Math.max(-.55,Math.min(.55,drag.angle + (event.clientX-drag.x)*.006));
-      render();
-    });
-    for (const type of ['pointerup','pointercancel','lostpointercapture']) {
-      world.addEventListener(type, () => { drag = undefined; });
-    }
-    world.append(renderer.domElement);
-    world.hidden = false;
-    labels.hidden = false;
-    flat.hidden = true;
-    stage.dataset.renderer = 'three';
-    const observer = new ResizeObserver(resize);
-    observer.observe(stage);
-    onSceneStep = (step, direction) => paint(step, direction > 0);
-    const recolor = () => paint(selected,false);
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', recolor);
-    resize();
-    paint(steps[index],false);
-  }
-  mountScene().catch(() => {
-    world.hidden = true;
-    labels.hidden = true;
-    flat.hidden = false;
-    delete stage.dataset.renderer;
-    onSceneStep = () => {};
-  });
-})();
-</script>
+<section class="lesson" id="interview" aria-labelledby="interview-title">
+  <h2 id="interview-title">面试时用三个问题自测</h2>
+  <details><summary>Pregel 在 LangGraph 里负责什么？</summary><p>它是执行运行时。<code>StateGraph.compile()</code> 装配节点和 Channel，Pregel 每轮选择可运行节点、执行任务、批量更新 Channel，再根据新版本开始下一轮。</p></details>
+  <details><summary>A 先跑完，B 能读到 A 刚写的值吗？</summary><p>同一 superstep 内，B 读取这一轮的输入，A 的节点写入在轮末合并后才对下一轮可见。若 B 必须依赖 A 的结果，就用边让 B 在后续轮次执行。</p></details>
+  <details><summary>为什么恢复审批可能重复执行节点里的代码？</summary><p><code>Command(resume=...)</code> 让运行时用同一个 <code>thread_id</code> 找回进度。被中断的节点从函数开头执行，到 <code>interrupt()</code> 时取到审批值。把写库、付款或发通知放在审批之后，重试路径再用业务幂等键保护。</p></details>
+</section>
 </main>
 </body>
 </html>
